@@ -613,15 +613,35 @@ module.exports.getSummaryStats = async (req, res) => {
 };
 
 module.exports.getMonthlyActivityFrequency = async (req, res) => {
-    const { month, year } = req.query;
-
-    // if (!month || !year) {
-    //     return res.status(400).json({
-    //         status: 400,
-    //         message: 'month and year are required'
-    //     });
-    // }
-
+    const { month, year, start_date, end_date } = req.query;
+ 
+    // ── Build WHERE clause depending on filter mode ──
+    let whereClause;
+    let queryParams;
+    let filterMeta;
+ 
+    const useRange = start_date && end_date;
+ 
+    if (useRange) {
+        // Custom date range: datetime >= start_date AND datetime < end_date + 1 day
+        whereClause = `
+            datetime >= $1::date
+            AND datetime < ($2::date + INTERVAL '1 day')
+            AND EXTRACT(DOW FROM datetime) BETWEEN 1 AND 5
+        `;
+        queryParams = [start_date, end_date];
+        filterMeta  = { start_date, end_date };
+    } else {
+        // Classic month + year filter (backward compatible)
+        whereClause = `
+            EXTRACT(MONTH FROM datetime) = $1
+            AND EXTRACT(YEAR FROM datetime) = $2
+            AND EXTRACT(DOW FROM datetime) BETWEEN 1 AND 5
+        `;
+        queryParams = [month, year];
+        filterMeta  = { month, year };
+    }
+ 
     try {
         const athleteQuery = `
             SELECT 
@@ -631,56 +651,50 @@ module.exports.getMonthlyActivityFrequency = async (req, res) => {
                 COUNT(DISTINCT DATE_TRUNC('day', datetime)) AS active_days,
                 SUM(distance) AS total_distance
             FROM club_activities
-            WHERE 
-                EXTRACT(MONTH FROM datetime) = $1
-                AND EXTRACT(YEAR FROM datetime) = $2
-                AND EXTRACT(DOW FROM datetime) BETWEEN 1 AND 5
+            WHERE ${whereClause}
             GROUP BY id_athlete, athlete_firstname, athlete_lastname
             ORDER BY active_days DESC, total_distance DESC
         `;
-
+ 
         const freqQuery = `
             WITH athlete_days AS (
                 SELECT 
                     id_athlete,
                     COUNT(DISTINCT DATE_TRUNC('day', datetime)) AS active_days
                 FROM club_activities
-                WHERE 
-                    EXTRACT(MONTH FROM datetime) = $1
-                    AND EXTRACT(YEAR FROM datetime) = $2
-                    AND EXTRACT(DOW FROM datetime) BETWEEN 1 AND 5
+                WHERE ${whereClause}
                 GROUP BY id_athlete
             )
             SELECT
-                COUNT(CASE WHEN active_days BETWEEN 1 AND 4 THEN 1 END) AS "1_to_4_days",
-                COUNT(CASE WHEN active_days BETWEEN 5 AND 9 THEN 1 END) AS "5_to_9_days",
+                COUNT(CASE WHEN active_days BETWEEN 1 AND 4  THEN 1 END) AS "1_to_4_days",
+                COUNT(CASE WHEN active_days BETWEEN 5 AND 9  THEN 1 END) AS "5_to_9_days",
                 COUNT(CASE WHEN active_days BETWEEN 10 AND 14 THEN 1 END) AS "10_to_14_days",
                 COUNT(CASE WHEN active_days BETWEEN 15 AND 19 THEN 1 END) AS "15_to_19_days",
-                COUNT(CASE WHEN active_days >= 20 THEN 1 END) AS "20_plus_days"
+                COUNT(CASE WHEN active_days >= 20            THEN 1 END) AS "20_plus_days"
             FROM athlete_days
         `;
-
+ 
         const [athleteResult, freqResult] = await Promise.all([
-            db.query(athleteQuery, [month, year]),
-            db.query(freqQuery, [month, year])
+            db.query(athleteQuery, queryParams),
+            db.query(freqQuery,    queryParams)
         ]);
-
+ 
         res.status(200).json({
-            status: 200,
+            status:  200,
             message: 'Success get monthly activity frequency',
             data: {
-                athletes: athleteResult.rows,
+                athletes:               athleteResult.rows,
                 frequency_distribution: freqResult.rows[0]
             },
-            filters: { month, year }
+            filters: filterMeta
         });
-
+ 
     } catch (err) {
         console.error('Error:', err);
         res.status(500).json({
-            status: 500,
+            status:  500,
             message: 'Server error',
-            error: err.message
+            error:   err.message
         });
     }
 };
